@@ -1,0 +1,47 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+.pnpm/
+dist/
+build/
+coverage/
+
+# 本地配置与快照（可能包含个人路径/密钥）
+*.local
+*.local.*
+.env
+.env.*
+settings.local.yaml
+credentials*
+*.bak
+*.bak-*
+*.bak.*
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+dump-*.yml
+web-dump*.yml
+*.tmp
+*.temp
+*.swp
+
+# 插件本地状态（Mimosa 会话 hook 等）
+.mimosa/
+.plugin-manager/
+
+# 压缩包与缓存
+*.zip
+*.tar.gz
+.cache/
+.zcode/
+.dsh/
+
+# 操作系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.code-workspace

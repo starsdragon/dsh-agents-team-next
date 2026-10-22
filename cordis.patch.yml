@@ -1,0 +1,5 @@
+# Bundle layer for dsh-agents-team-next: insert the plugin row into the Loader
+# tree. The user-facing config override lives in the profile's cordis.patch.yml.
+- insert:
+    - id: agents-team-next
+      name: dsh-agents-team-next
