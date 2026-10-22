@@ -1,42 +1,24 @@
 # dsh-agents-team-next
 
-给 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai) 用的子代理调度与完成纪律插件：**按任务分配思考强度、压缩派发上下文、只读展示每个子代理的实际档位**，并把"做好了就停"写进系统策略。
+给 DSH 写的插件，主要做三件事：让子代理按任务难度选思考强度、把派发出去的上下文写短一点、在界面上能看到每个子代理实际用了什么档位。
 
-> 仓库：<https://github.com/starsdragon/dsh-agents-team-next>
+起因是跑 Three.js 这类长任务时的几个问题：子代理一律按最高档思考，简单活也按最贵的算；派任务时整段对话原样转抄，token 涨得很快；界面上又看不到子代理在做什么。后来还碰到一个更麻烦的情况——活已经干完了，任务台账的提醒还在把模型往回拽，让它觉得自己没做完，继续改。所以除了调度，插件里也带了收尾的规则。
 
-> A DSH plugin for per-task reasoning-effort routing, compressed dispatch prompts, a read-only effort roster, and completion discipline. See [docs/BENCHMARK.md](docs/BENCHMARK.md) for real-task measurements.
+## 工作方式
 
-## 它解决什么问题
+插件只用了 DSH 的公开扩展点，没改任何 Agent preset 的私有配置。
 
-- **思考强度错配**：所有子任务一律满载思考，浅任务付了深推理的钱。
-- **派发上下文膨胀**：整段对话历史转抄给每个子代理，成本线性放大。
-- **不可观测**：子代理在干什么、用什么模型和档位，界面上看不见。
-- **已完成还在改**：任务台账/提醒机制与模型的"再优化冲动"叠加，把已经能用的产物拖回修改循环。
+**系统提示**。在提示里加一段 section，放在 10150 的位置。内容分四块：派出规划、完成与收尾纪律、档位选择、任务上下文压缩。放在靠后是有意的：提示缓存按前缀匹配，以后改这段文字只会让提示尾部重新冷启动，不会把整个系统提示的缓存全部作废。
 
-## 机制
+**派发兜底**。在 `tools/execute` 上挂了个 waterfall 监听。只有工具 schema 里声明了 `reasoning_effort`、并且这次调用确实没传，才填入 `defaultEffort`；显式传的值不会被覆盖。`spawn_teammate` 这类没有这个参数的工具不会被动。这段逻辑不写进提示——告诉模型"不传有默认值"，只会让它偷懒不选。
 
-### 1. 系统提示 section（order 10150，晚位、静态文本）
+**名册**。输入框下面加了个「子代理」按钮，点开是当前会话的子代理列表，带状态、模型和实际档位。数据同时兼容 Agent Team 的 `agentTeam` projection 和普通 subagent 的 `subagentCatalog`，点条目会打开对应子会话。名册只读，没有改档入口。
 
-- **派出规划**：开始前与工作中估计要派几个子代理、各自负责什么；能复用既有成员就不新派（新成员缓存前缀从零开始；Team 里与主会话强相关的成员用 `context: fork` 复用已缓存前缀）；长或易卡的操作（构建、浏览器/视觉验证、慢命令）可整体交给一个子代理/teammate（跑、有界重试、取证、回报），主会话继续；不派只 sleep/盯梢、没有执行与汇报职责的空转代理。
-- **完成与收尾纪律**：任务清单只登记能用现有工具取证的条目；交付前收口（`op:check` / `op:remove` / `op:pause_turn`），不留悬空条目；验收满足即交付、交付后停止修改，再改必须有可验证的缺陷证据；用户说"不需要了/交付"优先于清单提醒；验证命令单条 ≤2 分钟，同一手段连续失败 2 次换路线。
-- **档位选择**：`reasoning_effort` 每次委派显式选择（low / medium / high / xhigh / max），不把兜底档位写进提示（避免诱导省略）。
-- **任务上下文压缩**：只压缩派发给子代理的任务文本（目标/范围/必要约束/验收标准/必要避坑说明），并明写不适用于模型自己的推理与结论。
+**teammate 遮蔽**。teammate 不能派任务，上面那段面向 Lead 的规则在它们的会话里只是噪音，所以插件会给每个 teammate 注册一个同名的空 section，把全局那段遮掉。lead 和其他 agent 不受影响。
 
-section 放在提示晚位（`10150`，介于 `WEB_SURFACE 10100` 与 `DEPLOYMENT_PERSONA_SUFFIX 10200` 之间）是有意为之：提示缓存是前缀匹配的，晚位改动只会让提示尾部小段重新冷启动，不会作废整个系统提示前缀。
+## 实测
 
-### 2. 省略兜底（`tools/execute` waterfall，静默）
-
-仅当工具 schema 声明 `reasoning_effort`（兼容扁平参数表与 `parameters.properties` 两种形状）且调用**省略**该参数时，填入 `defaultEffort`；显式传值永不覆盖；未声明该参数的工具（如 Agent Team 的 `spawn_teammate`）一律不碰。兜底不写进提示文本，只作为漏传时的静默保险。
-
-### 3. 只读名册（Web composer dock）
-
-输入框下方的「子代理」触发器 + 数量角标，浮层列出每个子代理的状态、实际模型与**实际思考档位**；数据同时支持 `agentTeam`（Agent Team 世界）与 `subagentCatalog`（普通 subagent 世界）两种 projection；点击行用完整地址 `{parentSessionId, childSessionId, mode}` 打开子会话。**只读展示，不提供改档控件。**
-
-### 4. teammate 会话遮蔽
-
-对 teammate（非 lead）在其 agent context 上注册同名空文本 section，把这段面向 Lead 的 policy 在 teammate 会话里遮蔽——teammate 不能派任务，这段文本在它们那里只是噪音与泛化风险；lead 与非成员 agent 不受影响。
-
-## 实测（维护者本机，真实任务）
+三个任务上的会话数据。每个任务只跑了一轮，不是严格的 A/B：
 
 | 场景 | 总花费 | 缓存命中 |
 |---|---|---|
@@ -44,83 +26,61 @@ section 放在提示晚位（`10150`，介于 `WEB_SURFACE 10100` 与 `DEPLOYMEN
 | 中国古建筑体素建模 | 11.5M token | 93% |
 | 余烬谷 | 19.7M token | 98% |
 
-场景一与 ZCode + 同一模型（4.1f）完成同一任务相比，花费约为后者的一半。口径、混杂因素与复现建议见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+键盘建模那项，和 ZCode 用同一个模型（4.1f）跑同一个任务相比，花了大约一半。跨 harness 的差异不止来自插件，系统提示、工具集、编排方式都不一样，这个数字别当基准看。具体口径和怎么读这些数写在 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 
-## 安装（DSH Web profile）
+## 安装
 
-```bash
-# 1) 把本仓库放到 DSH 的插件源码目录（路径可自定）
-#    e.g. ~/.dsh/plugins-src/dsh-agents-team-next
+插件装在 DSH 的 web profile 里，用 `file:` 依赖。
 
-# 2) 在 profile 的 package.json 里：
-#    dependencies  增加  "dsh-agents-team-next": "file:<插件目录绝对路径>"
-#    dsh.profile.bundles 数组追加 "dsh-agents-team-next"
-
-# 3) profile 的 cordis.patch.yml 追加配置：
-# - id: agents-team-next
-#   config:
-#     defaultEffort: medium
-
-# 4) 安装并验证
-cd ~/.dsh/profiles/web
-pnpm install
-dsh --profile web --dump-config > /tmp/dump.yml 2>/tmp/dump.err
-# 期望：退出码 0、stderr 为空、树中有 agents-team-next 行与 defaultEffort
-```
-
-安装后需**完全重启 DSH Host**（新会话生效；旧会话的提示前缀已缓存）。
-
-## 配置
+1. 把仓库放到 DSH 的插件目录，比如 `~/.dsh/plugins-src/dsh-agents-team-next`。
+2. 编辑 profile 的 `package.json`：`dependencies` 里加一条 `"dsh-agents-team-next": "file:<插件目录绝对路径>"`，`dsh.profile.bundles` 数组里加上 `"dsh-agents-team-next"`。
+3. 在 profile 的 `cordis.patch.yml` 里加配置：
 
 ```yaml
 - id: agents-team-next
   config:
-    enabled: true        # false = 不注册提示 section、teammate 遮蔽与 tools/execute 监听
-    defaultEffort: medium # 省略 reasoning_effort 时的静默兜底；schema 默认 low
+    defaultEffort: medium
 ```
 
-建议 `defaultEffort: medium` 作为兜底地板：提示已要求每次委派显式选档，省略属于漏传，`low` 可能把需要完整思考的任务砍短。
-
-## 验证
+4. 安装并检查：
 
 ```bash
-node --check src/index.mjs && node --check src/policy.mjs && node --check src/client.js
-node --test test/policy.test.mjs   # 纯策略层，任何目录可跑
-
-# index 测试需要 @deepseek-ai/schemastery 可解析（在 DSH profile 内安装后运行）：
-node --test test/policy.test.mjs test/index.test.mjs
+cd ~/.dsh/profiles/web
+pnpm install
+dsh --profile web --dump-config > /tmp/dump.yml 2>/tmp/dump.err
 ```
 
-三层验证边界（诚实声明）：
+dump 的退出码应该是 0，stderr 为空，树里能看到 `agents-team-next` 行和 `defaultEffort`。
 
-1. **静态层**：语法、单元测试、`dump-config` 组合验证；
-2. **Host 运行时层**：必须完全重启 Host；system prompt section 与 `tools/execute` 兜底只在重启后生效；
-3. **浏览器层**：名册 UI 需要重启 Host 并开新会话后在 Web composer dock 出现。
+装完要完全重启 DSH Host，新会话才会用上新的提示。旧会话的前缀已经缓存，不会自动更新。
+
+## 配置
+
+`enabled` 关掉后，提示 section、teammate 遮蔽和派发兜底都会停，不用卸载。
+
+`defaultEffort` 是漏传档位时的兜底。schema 默认是 `low`，但我建议用 `medium`：提示里已经要求每次委派显式选档，真走到兜底说明是漏传，给 `low` 容易把需要完整思考的任务砍短。
 
 ## 已知限制
 
-- **提示是纪律不是强制**：模型仍可能误判任务难度、漏传档位或过度压缩；兜底只覆盖"漏传"这一种情况。
-- **Agent Team 世界**：`spawn_teammate` 没有 `reasoning_effort` 参数，`tools/execute` 兜底在此世界天然不动作（schema 守卫）；生效的是提示 section 与名册 UI。
-- **名册只列根会话的直接子代理**；嵌套子代理进入其会话后由官方 header 名册展示。
-- **缓存**：每个会话的首个请求必然全冷；会话中段的命中波动主要来自运行时上下文更新（文件变化导致系统区快照重渲染），不是本插件造成的逐请求失效。
-- **依赖 DSH 公开 seam**：`systemPrompt.section`、`tools/execute` waterfall、`composer.dock` slot、session projections；不修改任何 Agent preset 私有配置。DSH 版本升级若调整这些 seam，需要同步适配。
+- 提示是纪律，不是强制。模型仍可能判断错难度、漏传档位，或者把任务描述压得过狠。兜底只处理"漏传"这一种情况。
+- Agent Team 模式下，`spawn_teammate` 没有 `reasoning_effort` 参数，派发兜底不会动作（schema 守卫拦住了）。这个模式下真正起作用的是提示和名册。
+- 名册只列根会话的直接子代理。嵌套子代理进到它自己的会话里，看官方 header 上的名册。
+- 每个会话的第一个请求一定是冷的，命中率会随回合数涨。会话中段命中的波动主要来自运行时上下文更新（文件变了会重渲染系统区的快照），不是插件按请求造成的。
+- 依赖 DSH 的几个公开接口：`systemPrompt.section`、`tools/execute` waterfall、`composer.dock` slot、session projections。DSH 升级如果改了这些接口，插件要跟着改。
 
-## 兼容性
+## 测试
 
-- 测试环境：DSH Web profile（2026-10 发行版），Agent Team 启用与关闭两种组合；
-- Node ≥ 18（本仓库测试于 Node 24）；
-- 运行时依赖只 include 静态模块：`react`、`react/jsx-runtime`、`react-dom`、`@deepseek-ai/dsh-client-ui-primitives`。
-
-## 目录
-
+```bash
+node --check src/index.mjs && node --check src/policy.mjs && node --check src/client.js
+node --test test/policy.test.mjs
 ```
-src/policy.mjs   # 纯策略层：档位阶梯、schema 守卫、提示文本（零依赖，可直接测试）
-src/index.mjs    # Host：提示 section、teammate 遮蔽、tools/execute 兜底
-src/client.js    # Web：composer dock 只读名册
-test/            # node:test 单元/集成测试
-docs/BENCHMARK.md
+
+`policy.test.mjs` 不依赖任何东西，在哪都能跑。`index.test.mjs` 需要 `@deepseek-ai/schemastery` 能解析，装进 DSH profile 之后再跑：
+
+```bash
+node --test test/policy.test.mjs test/index.test.mjs
 ```
 
 ## 许可
 
-发布前请按需补充 LICENSE（本仓库未附带）。
+仓库还没放 LICENSE，用之前自己补一份。
